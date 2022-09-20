@@ -1,5 +1,6 @@
 # Load libraries
 library(biomaRt)
+library(data.table)
 library(dplyr)
 library(glue)
 library(ggplot2)
