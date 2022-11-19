@@ -17,9 +17,9 @@ orth.mouse <- getBM(attributes,
                     
 # Load DEG results table
 # Human COPA study
-carlsten_de_never_smoker <- read.table("/Users/leec/Downloads/Differential Expression Results/NeverSmoker differential expression.csv", header=T, fill=T, sep =",")
+carlsten_de_never_smoker <- read.table("NeverSmoker differential expression.csv", header=T, fill=T, sep =",")
 # Mouse study
-bjorn_ta_tc = read.table("/Volumes/proj-tracerx-lung/tctProjects/leec/airpollution/bjorn_TA_TC.csv", header=T, fill=T, sep=",")
+bjorn_ta_tc = read.table("exp1_TA_TC.csv", header=T, fill=T, sep=",")
 
 # Compare DEG results between human and mouse
 df = carlsten_de_never_smoker %>%
