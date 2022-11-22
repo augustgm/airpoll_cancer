@@ -17,7 +17,7 @@ comparisons_df = data.frame(
 )
 
 
-load("~/lime_working/tct_lime/projects/pollution_mouse/mouse_WGS/variant_calling/summary/original_VCF/RData/mutect_filtered.RData")
+load("mutect_filtered.RData")
 
 mutect_filtered_df = lapply(names(mutect_filtered),function(f_name){
   x = mutect_filtered[[f_name]]
@@ -177,7 +177,7 @@ sigs.inputs_adj_m = sigs.inputs_adj_mm[,2:ncol(sigs.inputs_adj_mm)]
 rownames(sigs.inputs_adj_m) = sigs.inputs_adj_mm$comparison
 
 
-load("/camp/project/proj-tracerx-lung/tctProjects/lime/projects/pollution_mouse/data/deconstructsigs/signatures.genome.cosmic.v3.may2019.rda")
+load("signatures.genome.cosmic.v3.may2019.rda")
 
 sigs_to_consider = c("SBS1","SBS4","SBS5","SBS2","SBS13","SBS40","SBS92","SBS17a","SBS17b","SBS18")
 which_sig_res = lapply(names(mutect_filtered),function(x){
