@@ -7,7 +7,7 @@ library(ggpubr)
 library(tidyr)
 library(patchwork)
 
-saga_results_anno_ltx_peace = fread("/camp/project/proj-tracerx-lung/tctProjects/lime/projects/egfr_normal/data/SAGA_Report_20210702/saga_results_anno_ltxpea_df_20220404_TND.txt")
+saga_results_anno_ltx_peace = fread("saga_results_anno_ltxpea_df_20220404_TND.txt")
 
 plot_freq_count = function(col_oi,saga_results_anno_ltx_include){
   color_bar = c("grey","#1b9e77","#d95f02","#4a1486","#7570b3","#7570b3","#7570b3","#e7298a","#66a61e","#e6ab02","#a6761d")

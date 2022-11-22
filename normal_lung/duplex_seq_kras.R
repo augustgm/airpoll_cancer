@@ -6,7 +6,7 @@ library(cowplot)
 library(ggpubr)
 library(tidyr)
 
-duplex_anno_df = fread("/camp/project/proj-tracerx-lung/tctProjects/duplex/data/tx_peace_jdg/process_sr_ltx/results/PEACE_BDRE_duplex_anno_df.txt")
+duplex_anno_df = fread("PEACE_BDRE_duplex_anno_df.txt")
   
 duplex_anno_plot_df = duplex_anno_df %>%  
   filter(SYMBOL=="KRAS") %>%
