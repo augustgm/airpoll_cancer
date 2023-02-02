@@ -1,0 +1,180 @@
+######################################################
+#        Cox regression on imputed UKBB data         #
+######################################################
+library(mice)
+library(survival)
+library(survminer)
+# library(rms)
+
+## ukbb with cancer data
+ukbb_cancer = read.csv(header = T, stringsAsFactors = F, file = "ukbb_smoking3_packyears_cancer_specific_gPCs_for_impute.csv") 
+
+## ukbb cancer before baseline - for alcohol 
+ukbb_cancer_prebaseline = read.csv(header = T, stringsAsFactors = F, file = "UKBB_decoded_cancers_before_baseline.csv")
+
+## Determine cancers
+cancers = grep("_binary", colnames(ukbb_cancer), value = T)
+cancer_region = unlist(lapply(strsplit(cancers[2:length(cancers)], split = "_binary"), FUN = function(x){x[1]}))
+
+### Iterate through cancer types
+conv_plots = list()
+non_ph_vars = c()
+orig_form_str = "Surv(time, curr_cancer_binary) ~ Smoking.status.0.0 + Packyears.0.0 + Tobacco.smoke.exposure.home.0.0 + Sex.0.0 + 
+                Age + BMI.0.0 + Total.household.income.before.tax.0.0 + Educational.attainment + Air.pollution.pm2.5 +
+                Genetic_principal_components.0.1 + Genetic_principal_components.0.2 + Genetic_principal_components.0.3 + 
+                Genetic_principal_components.0.4 + Genetic_principal_components.0.5 + Genetic_principal_components.0.6 +  
+                Genetic_principal_components.0.7 + Genetic_principal_components.0.8 + Genetic_principal_components.0.9 + 
+                Genetic_principal_components.10 + Genetic_principal_components.11 + Genetic_principal_components.12 + 
+                Genetic_principal_components.13 + Genetic_principal_components.14 + Genetic_principal_components.15"
+for (i in 1:length(cancer_region)) {
+  curr_region = cancer_region[i]
+  
+  if (curr_region %in% c("Prostate", "Uterus", "Ovary", "Skin_other")) {
+    next()
+  }
+  
+  test_alcohol = F
+  if (curr_region %in% c("Lip_oral_cavity_pharynx", "Larynx")) {
+    test_alcohol = T
+    orig_form_str = "Surv(time, curr_cancer_binary) ~ Smoking.status.0.0 + Packyears.0.0 + Tobacco.smoke.exposure.home.0.0 + Sex.0.0 + 
+                Age + BMI.0.0 + Total.household.income.before.tax.0.0 + Educational.attainment +  
+                Air.pollution.pm2.5 + Average.weekly.red.wine.intake.0.0 + Average.weekly.champagne.plus.white.wine.intake.0.0 +
+                Average.weekly.beer.plus.cider.intake.0.0 + Average.weekly.spirits.intake.0.0 + Average.weekly.fortified.wine.intake.0.0 + 
+                Genetic_principal_components.0.1 + Genetic_principal_components.0.2 + Genetic_principal_components.0.3 + 
+                Genetic_principal_components.0.4 + Genetic_principal_components.0.5 + Genetic_principal_components.0.6 +  
+                Genetic_principal_components.0.7 + Genetic_principal_components.0.8 + Genetic_principal_components.0.9 + 
+                Genetic_principal_components.10 + Genetic_principal_components.11 + Genetic_principal_components.12 + 
+                Genetic_principal_components.13 + Genetic_principal_components.14 + Genetic_principal_components.15"
+    
+    ## create data frame to hold VIF
+    vif_df = data.frame(matrix(NA, nrow = 30, ncol = 15))
+    colnames(vif_df) = paste0("Imp", 1:15)
+    vif_df$Region = curr_region
+    rownames(vif_df) = c("Smoking.status.0.0Current", "Smoking.status.0.0Previous", "Packyears", "Tobacco.smoke.exposure.home.0.0", 
+                         "Sex.0.0Male", "Age", "BMI.0.0", "Total.household.income.before.tax.0.0>= 31k", "Educational.attainment>= degree",                
+                         "Air.pollution.pm2.5", "Average.weekly.red.wine.intake.0.0", "Average.weekly.champagne.plus.white.wine.intake.0.0",
+                         "Average.weekly.beer.plus.cider.intake.0.0", "Average.weekly.spirits.intake.0.0", "Average.weekly.fortified.wine.intake.0.0", 
+                         "Genetic_principal_components.0.1", "Genetic_principal_components.0.2", "Genetic_principal_components.0.3", 
+                         "Genetic_principal_components.0.4", "Genetic_principal_components.0.5", "Genetic_principal_components.0.6", 
+                         "Genetic_principal_components.0.7", "Genetic_principal_components.0.8", "Genetic_principal_components.0.9",
+                         "Genetic_principal_components.0.10", "Genetic_principal_components.0.11", "Genetic_principal_components.0.12",
+                         "Genetic_principal_components.0.13", "Genetic_principal_components.0.14", "Genetic_principal_components.0.15")
+  } else {
+    orig_form_str = "Surv(time, curr_cancer_binary) ~ Smoking.status.0.0 + Packyears.0.0 + Tobacco.smoke.exposure.home.0.0 + Sex.0.0 + 
+                Age + BMI.0.0 + Total.household.income.before.tax.0.0 + Educational.attainment +  Air.pollution.pm2.5 +
+                Genetic_principal_components.0.1 + Genetic_principal_components.0.2 + Genetic_principal_components.0.3 + 
+                Genetic_principal_components.0.4 + Genetic_principal_components.0.5 + Genetic_principal_components.0.6 +  
+                Genetic_principal_components.0.7 + Genetic_principal_components.0.8 + Genetic_principal_components.0.9 + 
+                Genetic_principal_components.10 + Genetic_principal_components.11 + Genetic_principal_components.12 + 
+                Genetic_principal_components.13 + Genetic_principal_components.14 + Genetic_principal_components.15"
+    
+    ## create data frame to hold VIF
+    vif_df = data.frame(matrix(NA, nrow = 25, ncol = 15))
+    colnames(vif_df) = paste0("Imp", 1:15)
+    vif_df$Region = curr_region
+    rownames(vif_df) = c("Smoking.status.0.0Current", "Smoking.status.0.0Previous", "Packyears", "Tobacco.smoke.exposure.home.0.0",
+                         "Sex.0.0Male", "Age", "BMI.0.0", "Total.household.income.before.tax.0.0>= 31k", "Educational.attainment>= degree",                
+                         "Air.pollution.pm2.5", "Genetic_principal_components.0.1", "Genetic_principal_components.0.2",
+                         "Genetic_principal_components.0.3", "Genetic_principal_components.0.4", "Genetic_principal_components.0.5",               
+                         "Genetic_principal_components.0.6", "Genetic_principal_components.0.7", "Genetic_principal_components.0.8",               
+                         "Genetic_principal_components.0.9" , "Genetic_principal_components.0.10", "Genetic_principal_components.0.11",               
+                         "Genetic_principal_components.0.12", "Genetic_principal_components.0.13", "Genetic_principal_components.0.14",              
+                         "Genetic_principal_components.0.15")
+  }
+  if (curr_region == "Brain") {curr_region = "GBM"}
+  print(paste0("######## current cancer = ", curr_region, " ################"))
+  
+  ## read in imputed dataset object
+  imp_path = paste0("imp_cox_analysis_baselineAge_incl_gPCs_", curr_region, "_outcomes.rds")
+  curr_cancer_data = readRDS(file = imp_path)
+ 
+  ## Assess convergence
+  conv_plots[[i]] = plot(curr_cancer_data)
+  names(conv_plots)[[i]] = curr_region 
+  
+  ### Iterate through the 15 imputed datasets and perform analysis on each one
+  fit_list_mira = list()
+  
+  for (j in 1:15) {  
+    ukbb_clean = complete(curr_cancer_data, j)
+    print(paste0("### ", curr_region, ": imp = ", j, " ###"))
+    
+    if (test_alcohol) {
+      ukbb_clean = merge(x = ukbb_clean, by = "Patient_ID",
+                         y = ukbb_cancer_prebaseline[, c("Patient_ID", grep("Average.weekly", colnames(ukbb_cancer_prebaseline), value = T))])
+      ukbb_clean[, "Average.weekly.intake.of.other.alcoholic.drinks.0.0"] <- NULL     
+      ukbb_clean$Average.weekly.beer.plus.cider.intake.0.0 = as.numeric(ukbb_clean$Average.weekly.beer.plus.cider.intake.0.0)
+      ukbb_clean$Average.weekly.champagne.plus.white.wine.intake.0.0 = as.numeric(ukbb_clean$Average.weekly.champagne.plus.white.wine.intake.0.0)
+      ukbb_clean$Average.weekly.red.wine.intake.0.0 = as.numeric(ukbb_clean$Average.weekly.red.wine.intake.0.0)
+      ukbb_clean$Average.weekly.fortified.wine.intake.0.0 = as.numeric(ukbb_clean$Average.weekly.fortified.wine.intake.0.0)
+      ukbb_clean$Average.weekly.spirits.intake.0.0 = as.numeric(ukbb_clean$Average.weekly.spirits.intake.0.0)
+      # Remove NAs
+      index <- unique(c(which(is.na(ukbb_clean$Average.weekly.beer.plus.cider.intake.0.0)),
+                        which(is.na(ukbb_clean$Average.weekly.champagne.plus.white.wine.intake.0.0)),
+                        which(is.na(ukbb_clean$Average.weekly.red.wine.intake.0.0)),
+                        which(is.na(ukbb_clean$Average.weekly.fortified.wine.intake.0.0)),
+                        which(is.na(ukbb_clean$Average.weekly.spirits.intake.0.0))))
+      ukbb_clean = ukbb_clean[-index, ]
+    }
+    ## rename columns to match with variable names    
+    colnames(ukbb_clean)[colnames(ukbb_clean) == paste0(curr_region, "_binary")] <- "curr_cancer_binary"
+    colnames(ukbb_clean)[colnames(ukbb_clean) == paste0(curr_region, "_time")] <- "time"
+    colnames(ukbb_clean)[colnames(ukbb_clean) == "Genetic_principal_components.0.10"] <- "Genetic_principal_components.10"
+    colnames(ukbb_clean)[colnames(ukbb_clean) == "Genetic_principal_components.0.11"] <- "Genetic_principal_components.11"
+    colnames(ukbb_clean)[colnames(ukbb_clean) == "Genetic_principal_components.0.12"] <- "Genetic_principal_components.12"
+    colnames(ukbb_clean)[colnames(ukbb_clean) == "Genetic_principal_components.0.13"] <- "Genetic_principal_components.13"
+    colnames(ukbb_clean)[colnames(ukbb_clean) == "Genetic_principal_components.0.14"] <- "Genetic_principal_components.14"
+    colnames(ukbb_clean)[colnames(ukbb_clean) == "Genetic_principal_components.0.15"] <- "Genetic_principal_components.15"
+    
+    # Initial model without any time-dependent variables to check proportional hazards assumption
+    form_str = orig_form_str
+    model = coxph(formula = as.formula(form_str),data = ukbb_clean, na.action = na.omit, x = T)
+    
+    ## Test cox proportional hazards (PH) assumption
+    ph_test = cox.zph(model)
+    ph_test_table = as.data.frame(ph_test$table)
+    ph_test_df = ph_test_table[ph_test_table[, "p"] < 0.05, ]
+    print(ph_test_df)
+    
+    ## Check if any variables fail the PH assumption
+    if (nrow(ph_test_df) > 0) {
+      vars_to_plot = rownames(ph_test_table[ph_test_table$p < 0.05, ])
+      
+      ## Variables that fail PH assumption based on (potentially overly sensitive) test - PH assumption for these are confirmed visually
+      for (k in 1:length(vars_to_plot)) {
+        non_ph_vars = c(non_ph_vars, paste0(curr_region, "-imp", j, "-", vars_to_plot[k]))
+      }
+    }
+    
+    ## Assess collinearity ##
+    cvif = rms::vif(model)
+    vif_df[, j] = cvif
+    
+    ## Append model to list
+    fit_list_mira[[j]] <- model
+  }
+
+  ## Save VIF data for current cancer
+  write.csv(vif_df, row.names = T, file = paste0("AirPoll_", curr_region, "_VIF.csv"))
+  
+  ## save series of models
+  saveRDS(object = fit_list_mira, file =  paste0("AirPoll_", curr_region, "_model_list.rds"))
+    
+  ## Pool results of each imputed dataset by Rubin's rules 
+  mira_pool = as.mira(fit_list_mira)  
+  pooled_sum = summary(pool(mira_pool))
+
+  ## Create data frame with current results and calculate confidence intervals
+  model_or_ci = data.frame(coefficient = as.character(pooled_sum$term),
+                           HR = exp(pooled_sum$estimate),
+                           LowerCI = exp(pooled_sum$estimate - (1.96 * pooled_sum$std.error)),
+                           UpperCI = exp(pooled_sum$estimate + (1.96 * pooled_sum$std.error)),
+                           pval = pooled_sum$p.value,
+                           cancer_reg = curr_region) 
+  ## save results
+  write.csv(model_or_ci, row.names = F, file = paste0("AirPoll_", curr_region, "_CIs_noInteraction_Packyears.csv"))
+}
+
+## save to file
+saveRDS(conv_plots, file = "imp_objects_convergence_plots_full.rds")
+saveRDS(non_ph_vars, file = "nonPH_vars.rds")
