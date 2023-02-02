@@ -5,6 +5,9 @@ library(dplyr)
 library(data.table)
 library(reshape2)
 
+## Specify if subsetting to participants at same address for >= 3 years pre-baseline
+time_at_baseline = F
+
 ### read in cancer diagnosed before baseline, exclude those diagnosed before baseline
 ukbb_decoded = fread(header = T, stringsAsFactors = F,
                      file = "UKBB_decoded_cancers_before_baseline.csv") %>%
@@ -66,6 +69,17 @@ ukbb_decoded = ukbb_decoded[, (!(colnames(ukbb_decoded) %in% c("Educational.atta
 ukbb_decoded = ukbb_decoded[, (!(colnames(ukbb_decoded) %in% grep("^ICD10", colnames(ukbb_decoded), value = T)))]
 ukbb_decoded = ukbb_decoded[, (!(colnames(ukbb_decoded) %in% grep("^ICD9", colnames(ukbb_decoded), value = T)))]
 
+
+###  Exclude those who were living at baseline address for < 3 years prior to baseline
+if (time_at_baseline) {
+## read in address data and merge with current data frame
+ukbb_coord = read.csv(header = T, stringsAsFactors = F, file = "ukbb_address_data_time_current_address_decoded.csv")
+ukbb_decoded = merge(x = ukbb_decoded, y = ukbb_coord[, c("Patient_ID", "Time.current.address.0.0")], by = "Patient_ID")
+
+ukbb_decoded$Time.current.address.0.0 <- as.numeric(ukbb_decoded$Time.current.address.0.0)
+ukbb_decoded = ukbb_decoded[!(is.na(ukbb_decoded$Time.current.address.0.0)), ]
+ukbb_decoded = ukbb_decoded[ukbb_decoded$Time.current.address.0.0 >= 3, ]
+}
 
 ### Read in primary cancer data and merge with above 
 ukbb_cancers = fread(stringsAsFactors = F, header = T, file = "ukbb_primary_cancers_for_merge_with_imputation.csv") %>%
