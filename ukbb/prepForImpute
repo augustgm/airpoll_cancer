@@ -1,0 +1,177 @@
+#################################
+# Prepare ukbb data for imputation
+##################################
+library(dplyr)
+library(data.table)
+library(reshape2)
+
+### read in cancer diagnosed before baseline, exclude those diagnosed before baseline
+ukbb_decoded = fread(header = T, stringsAsFactors = F,
+                     file = "UKBB_decoded_cancers_before_baseline.csv") %>%
+  as.data.frame()
+
+ukbb_decoded = ukbb_decoded[ukbb_decoded$cancer_before_baseline_binary == 0, ]
+
+### Smoking status and packyears 
+# replace those who have missing packyears data because they are never smokers
+ukbb_decoded[(!(is.na(ukbb_decoded$Smoking.status.0.0))) &
+               (ukbb_decoded$Smoking.status.0.0 == "Never"), "Packyears.0.0"] <- 0
+               
+ukbb_decoded[(ukbb_decoded$Smoking.status.0.0 %in% c("Prefer not to answer")), "Smoking.status.0.0"] = NA
+
+#### Binarise max education attainment ####
+ed_melt = reshape2::melt(ukbb_decoded[, c("Patient_ID", grep("Educational.attainment.0", colnames(ukbb_decoded), value = T))], id.vars = "Patient_ID")
+
+## define categories
+degree_or_prof_qual = c("Other professional qualifications eg: nursing, teaching", 
+                        "College or University degree")
+
+below_degree = c("None of the above", "A levels/AS levels or equivalent",
+                 "CSEs or equivalent", "NVQ or HND or HNC or equivalent",
+                 "O levels/GCSEs or equivalent")
+
+deg_pats = unique(ed_melt[ed_melt$value %in% degree_or_prof_qual, "Patient_ID"])
+below_deg_pats = unique(ed_melt[(ed_melt$value %in% below_degree), "Patient_ID"])
+below_deg_pats = below_deg_pats[!(below_deg_pats %in% deg_pats)] 
+
+## enforce categories 
+ed_melt$education = NA
+ed_melt[ed_melt$Patient_ID %in% deg_pats, "education"] = ">= degree"
+ed_melt[ed_melt$Patient_ID %in% below_deg_pats, "education"] = "< degree"
+
+ed_categs = as.data.frame(table(dplyr::distinct(ed_melt[, c("Patient_ID", "education")])$education))
+ed_categs$pct = 100 * (ed_categs$Freq / nrow(ukbb_decoded))
+ed_categs
+
+## binary education column
+ukbb_decoded$Educational.attainment = NA
+ukbb_decoded[ukbb_decoded$Patient_ID %in% deg_pats, "Educational.attainment"] = ">= degree"
+ukbb_decoded[ukbb_decoded$Patient_ID %in% below_deg_pats, "Educational.attainment"] = "< degree"
+rm(ed_categs, ed_melt, below_deg_pats, below_degree, deg_pats, degree_or_prof_qual)
+
+## clean up columns
+ukbb_decoded = ukbb_decoded[, (!(colnames(ukbb_decoded) %in% c("Educational.attainment.0.0", "Educational.attainment.0.1", 
+                                                               "Educational.attainment.0.2", "Educational.attainment.0.3",
+                                                               "Educational.attainment.0.4", "Educational.attainment.0.5", 
+                                                               "Educational.attainment.1.0", "Educational.attainment.1.1",
+                                                               "Educational.attainment.1.2", "Educational.attainment.1.3", 
+                                                               "Educational.attainment.1.4", "Educational.attainment.1.5",
+                                                               "Educational.attainment.2.0", "Educational.attainment.2.1", 
+                                                               "Educational.attainment.2.2", "Educational.attainment.2.3",
+                                                               "Educational.attainment.2.4", "Educational.attainment.2.5", 
+                                                               "Educational.attainment.3.0", "Educational.attainment.3.1",
+                                                               "Educational.attainment.3.2", "Educational.attainment.3.3", 
+                                                               "Educational.attainment.3.4", "Educational.attainment.3.5")))]
+
+ukbb_decoded = ukbb_decoded[, (!(colnames(ukbb_decoded) %in% grep("^ICD10", colnames(ukbb_decoded), value = T)))]
+ukbb_decoded = ukbb_decoded[, (!(colnames(ukbb_decoded) %in% grep("^ICD9", colnames(ukbb_decoded), value = T)))]
+
+
+### Read in primary cancer data and merge with above 
+ukbb_cancers = fread(stringsAsFactors = F, header = T, file = "ukbb_primary_cancers_for_merge_with_imputation.csv") %>%
+  as.data.frame()
+ukbb_cancers = ukbb_cancers[, (!(colnames(ukbb_cancers) %in% grep("Brain", colnames(ukbb_cancers), value = T)))]
+ukbb_decoded = merge(x = ukbb_decoded, y = ukbb_cancers, by = "Patient_ID")
+rm(ukbb_cancers)
+
+### Read in primary histology cancer and merge with above
+ukbb_hist = read.csv(header = T, stringsAsFactors = F,
+                     file = "ukbb_primary_cancers_gbm_luad_histology_for_merge_with_imputation.csv")
+                     
+ukbb_decoded = merge(x = ukbb_decoded, y = ukbb_hist[, c("Patient_ID", grep(paste0(c("GBM", "LUAD"), collapse = "|"),
+                                                                            colnames(ukbb_hist), value = T))],
+                     by = "Patient_ID")
+rm(ukbb_hist)
+
+### Exclude those with missing PM data
+ukbb_decoded = ukbb_decoded[(!(is.na(ukbb_decoded$PM2.5.0.0))), ]
+
+### Exclude those with missing genetic PCs
+ukbb_decoded = ukbb_decoded[(!(is.na(ukbb_decoded$Genetic.principal.components.0.1))), ]
+desired_cols = c("Patient_ID", "Age", "Smoking.status.0.0", "Packyears.0.0", "Tobacco.smoke.exposure.home.0.0", "Sex.0.0", "BMI.0.0", 
+                 "Total.household.income.before.tax.0.0", "Educational.attainment", "PM2.5.0.0",
+                 grep("Genetic", colnames(ukbb_decoded), value = T)[1:15], grep("_binary", colnames(ukbb_decoded), value = T), 
+                 grep("_time", colnames(ukbb_decoded), value = T))
+
+#### Exclude those with dates of diagnosis but no entries in corresponding ICD10 or ICD9 cancer type columns ####
+cancer_type_cols = grep("Type.of.cancer.ICD10", colnames(ukbb_decoded), value = T)    # length = 22
+cancer_icd9_cols = grep("Type.of.cancer.ICD9", colnames(ukbb_decoded), value = T)     # length = 15
+date_diag_cols = grep("Date.of.cancer.diagnosis", colnames(ukbb_decoded), value = T)  # length = 22
+
+length_vec = c()
+pats_to_exclude = c()
+for (i in 1:length(cancer_icd9_cols)) {
+  curr_icd10 = cancer_type_cols[i]
+  curr_date = date_diag_cols[i]
+  curr_icd9 = cancer_icd9_cols[i]
+  length_vec = c(length_vec, length(which(is.na(ukbb_decoded[, curr_icd10]))))
+  
+  ## Subset to those with dates of diagnosis but no corresponding ICD10 code
+  missing_icd10 = ukbb_decoded[(ukbb_decoded[, curr_icd10] == "") & (!(is.na(ukbb_decoded[, curr_date]))), ]
+  
+  ## Further subset the above to get those with no corresponding ICD9 code either
+  missing_icd10[is.na(missing_icd10[, curr_icd9]), curr_icd9] = "NA"  # convert to string "NA"
+  pats_to_exclude = c(pats_to_exclude, missing_icd10[(missing_icd10[, curr_icd9] == "NA") |
+                                                       (missing_icd10[, curr_icd9] == ""), "Patient_ID"])
+}
+print(sum(length_vec))  # 0
+pats_to_exclude = unique(pats_to_exclude)  # 3 patients
+ukbb_decoded = ukbb_decoded[!(ukbb_decoded$Patient_ID %in% pats_to_exclude), ]
+rm(i, curr_date, curr_icd10, curr_icd9, length_vec, missing_icd10, pats_to_exclude, cancer_type_cols, cancer_icd9_cols, date_diag_cols)
+
+
+## Convert tobacco smoking at home (passive smoking) to numerical
+ukbb_decoded$Tobacco.smoke.exposure.home.0.0 <- as.numeric(ukbb_decoded$Tobacco.smoke.exposure.home.0.0)
+
+## Binarise categorical variables that allow binarisation
+ukbb_decoded[ukbb_decoded$Total.household.income.before.tax.0.0 %in% c("Prefer not to answer", "Do not know"),
+             "Total.household.income.before.tax.0.0"] <- NA
+
+ukbb_decoded[(!(is.na(ukbb_decoded$Total.household.income.before.tax.0.0))) & 
+               (ukbb_decoded$Total.household.income.before.tax.0.0 %in% c("Less than 18,000", "18,000 to 30,999")),
+             "Total.household.income.before.tax.0.0"] <- "< 31k"
+ukbb_decoded[(!(is.na(ukbb_decoded$Total.household.income.before.tax.0.0))) & 
+               (ukbb_decoded$Total.household.income.before.tax.0.0 %in% c("31,000 to 51,999", "52,000 to 100,000",
+                                                                          "Greater than 100,000")),
+             "Total.household.income.before.tax.0.0"] <- ">= 31k"
+
+### Determine cancers with n>=100 and subset to just these cancers
+high_n = c()
+low_n = c()
+cancer_cols = grep("_binary", colnames(ukbb_decoded), value = T)
+cancer_cols = cancer_cols[!(cancer_cols %in% c("cancer_before_baseline_binary", "curr_cancer_binary"))]
+for (i in 1:length(cancer_cols)) {
+  curr_col = cancer_cols[i]
+  num_pats = nrow(ukbb_decoded[ukbb_decoded[, curr_col] == 1, ])
+  if (num_pats >= 100) {
+    high_n = c(high_n, curr_col)
+  } else {
+    low_n = c(low_n, curr_col)
+  }
+}
+rm(i, curr_col, num_pats)
+
+## Subset cancer columns to only those which will contain n>=100
+low_n_cancers = unlist(lapply(strsplit(low_n, split = "_binary"), FUN = function(x){x[1]}))
+ukbb_decoded = ukbb_decoded[, (!(colnames(ukbb_decoded) %in% grep(paste0(low_n_cancers, collapse = "|"), 
+                                                                  colnames(ukbb_decoded), value = T)))]
+
+#### Subset to columns of interest prior to imputation 
+desired_cols = desired_cols[!(desired_cols %in% grep(paste0(low_n_cancers, collapse = "|"), desired_cols, value = T))]
+desired_cols = desired_cols[desired_cols != "cancer_before_baseline_binary"]
+bb_to_impute = ukbb_decoded[, desired_cols]
+
+## convert to factors
+bb_to_impute$Sex.0.0 = factor(bb_to_impute$Sex.0.0, levels = c("Female", "Male"))
+
+bb_to_impute$Smoking.status.0.0 = factor(bb_to_impute$Smoking.status.0.0, levels = c("Never", "Previous", "Current"))
+
+bb_to_impute$Total.household.income.before.tax.0.0 = factor(bb_to_impute$Total.household.income.before.tax.0.0,
+                                                            levels = c("< 31k", ">= 31k"))
+
+bb_to_impute$Educational.attainment = factor(bb_to_impute$Educational.attainment, 
+                                             levels = c("< degree", ">= degree"))
+
+## save output for imputation
+write.csv(bb_to_impute, row.names = F,
+          file = "ukbb_smoking3_packyears_cancer_specific_gpc_for_impute.csv")
