@@ -1,0 +1,215 @@
+#############################################################
+#     Determine Cancer Registry diagnoses before baseline   # 
+#############################################################
+library(readxl)
+library(dplyr)
+library(zoo)  
+
+## Read in data: columns contain relevant UKBB variables
+ukbb_decoded <- read.csv("UKBB_decoded_cancer_reg_hosp_diag_data.csv",
+                         stringsAsFactors = F, header = T)
+
+#### Cancer codes ####
+## Read in uKBB data encoding definitions
+bb_codings <- read.delim(file = "UKbiobankCodings.tsv",
+                         header = T, stringsAsFactors = F)
+
+## Read in anatomical definitions of ICD10 cancers
+cancer_codes_by_region_icd10 <- read.csv("cancer_codes_cancer_region.csv")
+
+## Read in anatomical definitions of ICD9 cancers
+cancer_codes_by_region_icd9 <- read.csv("cancer_codes_cancer_region_icd9.csv")
+
+## Data frame containing variables of interest mapped to their UKBB data field ID and encoding
+ukbb_data_ids = as.data.frame(read_excel("LC_UKBB_fieldIDs_CoxAnalyses.xlsx"))
+
+## Merge to get cancer encodings - as we are using both ICD10 and ICD9, will need to subset by Name == ICD9 or ICD10 for identifying diagnoses
+coded_data <- ukbb_data_ids[ukbb_data_ids$Name %in% c("Type.of.cancer.ICD10", "Type.of.cancer.ICD9"), ]
+encodings <- merge(coded_data, bb_codings, by.x = "Coding") 
+encodings$source = "NA"
+encodings[encodings$Name == "Type.of.cancer.ICD10", "source"] = "ICD10"
+encodings[encodings$Name == "Type.of.cancer.ICD9", "source"] = "ICD9"
+
+## Obtain dataframe of all cancer subtypes codes and their meaning ##
+chosen_d_codes = grep("D", cancer_codes_by_region_icd10$Code, value = T)
+d_codes = encodings[encodings$Meaning %in% grep(paste0(chosen_d_codes, collapse = "|"), encodings[encodings$source == "ICD10", "Meaning"], value = T), "Value"]
+cancers_icd10 = c(grep("C", encodings[encodings$source == "ICD10", "Value"], value = T), d_codes)
+
+cancers_icd9 = grep(paste0(paste0("^", cancer_codes_by_region_icd9$Code), collapse = "|"), encodings[encodings$source == "ICD9", "Value"], value = T)
+
+cancer_encodings <- rbind(encodings[(encodings$source == "ICD10") & (encodings$Value %in% cancers_icd10), c("Value", "Meaning", "source")], 
+                          encodings[(encodings$source == "ICD9") & (encodings$Value %in% cancers_icd9), c("Value", "Meaning", "source")])
+
+## Remove cancer_encodings rows with "Block" in them - these aren't diagnoses, they define code chunks (e.g. C00-14)
+index <- grep("Block", cancer_encodings$Value)
+cancer_encodings <- cancer_encodings[-index, ]
+
+## Remove cancer_encodings rows with "Chapter" in them - these aren't diagnoses
+index <- grep("Chapter", cancer_encodings$Value)
+cancer_encodings <- cancer_encodings[-index, ]
+rm(cancers_icd10, cancers_icd9)
+
+# Assign certain codes the name of their cancer e.g:
+cancer_codes_by_region = rbind(cancer_codes_by_region_icd10, cancer_codes_by_region_icd9)
+rownames(cancer_codes_by_region) <- NULL
+cancer_encodings$Region <- NA
+for (i in 1:nrow(cancer_codes_by_region)) {
+  index <- grep(paste0("^", cancer_codes_by_region$Code[i]), cancer_encodings$Meaning)
+  cancer_encodings[index, "Region"] <- cancer_codes_by_region$Cancer.Type[i]
+}
+
+## Identify and remove NAs - codes which do not map to a region (e.g. C78, as instead, it was split into C78.1, C78.2 etc.), 
+## C91 Lymphoid leukaemia split into CLL and ALL, C92 Myeloid leukaemia split into AML, CML
+cancer_encodings <- cancer_encodings[!is.na(cancer_encodings$Region), ]  
+rm(bb_codings, encodings, i, index, cancer_codes_by_region_icd10, cancer_codes_by_region_icd9, ukbb_data_ids, chosen_d_codes, d_codes)
+
+## Check whether there are any cancer codes that are missed by the cancer_codes_cancer_regions CSV and append to dataframe for checking for pre-baseline diagnoses
+cancer_vec = c()
+icd10_cancer = grep("Type.of.cancer.ICD10.", colnames(ukbb_decoded), value = T)
+icd9_cancer = grep("Type.of.cancer.ICD9.", colnames(ukbb_decoded), value = T)
+
+# ICD10 columns
+for (i in 1:length(icd10_cancer)) {
+  curr_col = icd10_cancer[i]
+  cancer_vec = c(cancer_vec, unique(ukbb_decoded[, curr_col]))
+}
+cancer_vec = unique(cancer_vec)
+
+# ICD9 columns
+for (i in 1:length(icd9_cancer)) {
+  curr_col = icd9_cancer[i]
+  cancer_vec = c(cancer_vec, unique(ukbb_decoded[, curr_col]))
+}
+cancer_vec = unique(cancer_vec)
+cancer_vec = cancer_vec[!(is.na(cancer_vec))]
+cancer_vec = cancer_vec[cancer_vec != ""]
+
+# From cancer_vec remove those not being considered as pre-baseline cancers for our purposes: ICD10
+exclude = paste0("^D", 10:36)
+cancer_vec = cancer_vec[-grep(paste0(exclude, collapse = "|"), cancer_vec, value = F)]  
+
+# Hydatiform moles are excluded
+exclude = c("O01.9 Hydatidiform mole, unspecified", "O01.1 Incomplete and partial hydatidiform mole", "O01.0 Classical hydatidiform mole")
+cancer_vec = cancer_vec[!(cancer_vec %in% exclude)]
+
+# From cancer_vec remove those not being considered as pre-baseline cancers for our purposes: ICD9
+exclude = paste0("^", 210:229)
+cancer_vec = cancer_vec[-grep(paste0(exclude, collapse = "|"), cancer_vec, value = F)]  
+
+# Exclude codes from chapter III: endocrine, nutritional and metabolic diseases, and immunity disorders
+exclude = paste0("^", 240:279)
+cancer_vec = cancer_vec[-grep(paste0(exclude, collapse = "|"), cancer_vec, value = F)]  
+
+# Exclude codes from Chapter XI: complications of pregnancy, childbirth, and the puerperium
+exclude = c(paste0("^", 630:633), paste0("^", 634:939))
+cancer_vec = cancer_vec[-grep(paste0(exclude, collapse = "|"), cancer_vec, value = F)]  
+
+cancer_encodings[cancer_encodings$Value %in% c("195", "187", "192"), ]
+# Append the above missing codes to cancer_encodings
+missing_codes = data.frame(Value = c("195", "187", "192"), 
+                           Meaning = c("195 Malignant neoplasm of other and ill-defined sites", "187 Malignant neoplasm of penis and other male genital organs",
+                                       "192 Malignant neoplasm of other and unspecified parts of nervous system"),
+                           source = c("ICD9", "ICD9", "ICD9"),
+                           Region = c("Other_and_ill-defined_sites", "Penis_and_other_male_genital_organs", "Unspecified_parts_of_nervous_system"))
+cancer_encodings = rbind(cancer_encodings, missing_codes)
+rownames(cancer_encodings) <- NULL
+rm(cancer_vec, missing_codes, exclude, coded_data, curr_col, i)
+
+### Code to determine those with any cancer diagnosed before baseline 
+# create new column to store data for any cancer diagnosed before baseline
+# iterate through each primary cancer type ICD10 code
+# identify those diagnosed with this cancer type
+# check that the tumour behaviour corresponded to any non-benign
+# Determine date of diagnosis and date attended assessment centre
+# if date of diagnosis preceded date attended assessment centre, mark the new column as 1 (diag with any cancer before)
+
+index_icd10cols = grep("Type.of.cancer.ICD10", colnames(ukbb_decoded), value = F)
+index_icd9cols = grep("Type.of.cancer.ICD9", colnames(ukbb_decoded), value = F)
+behav_cols = grep("Behaviour.of.cancer", colnames(ukbb_decoded), value = T)
+index_behav_cols = grep("Behaviour.of.cancer", colnames(ukbb_decoded), value = F)  
+index_hist_cols = grep("Histology", colnames(ukbb_decoded), value = F)
+index_date_cols = grep("Date.of.cancer", colnames(ukbb_decoded), value = F)
+index_age_cols = grep("Age.at.cancer", colnames(ukbb_decoded), value = F)
+index_rec_orig = grep("Cancer.record.origin", colnames(ukbb_decoded), value = F)
+
+## Define cancer behaviours to be included - all non-benign types
+cancer_behavs = c("Uncertain whether benign or malignant", "Carcinoma in situ", "NA",
+                  "Malignant, primary site", "Malignant, metastatic site", "Malignant, uncertain whether primary or metastatic site")
+
+cancer_diag_before_baseline = function(object, index_icdcols, index_behav_cols, index_date_cols,
+                                       index_age_cols, disease_codes, index_rec_orig, behav_cols, cancer_behavs) {
+  ## Convert all NAs in cancer behaviour column to string
+  for (i in 1:length(behav_cols)) {
+    curr_col = behav_cols[i]
+    object[is.na(object[, curr_col]), curr_col] = "NA"
+  }
+  
+  ## Create columns to hold outputs
+  object$any_cancer_diag_before_baseline <- "0"  # allow for specific cancer types
+  
+  if (!("cancer_before_baseline_binary" %in% colnames(object))) {
+    object$cancer_before_baseline_binary <- "0"  # allow for running total
+  }
+  
+  ## Iterate through codes for cancer subtypes mapping to current region
+  for (i in 1:length(disease_codes)) {
+    curr_cancer = disease_codes[i]
+  
+    # Determine row-column index of entries matching to current cancer ICD code
+    row_col_index <- which(object[, index_icdcols] == curr_cancer, arr.ind = T)
+    
+    ## If this ICD code is present for >= 1 patient, check behaviour
+    if (nrow(row_col_index) >= 1) {
+      for (k in 1:nrow(row_col_index)) {
+        ## Check the behaviour entry corresponding to current patient's ICD cancer code is non-benign
+        if (object[row_col_index[k, 1], index_behav_cols[row_col_index[k, 2]]] %in% cancer_behavs) {   
+          ## Get date of diagnosis for current patient and malignant primary cancer type (ICD code)
+          date_of_diag = object[row_col_index[k, 1], index_date_cols[row_col_index[k, 2]]]
+          
+          ## Determine if date of diagnosis is before recruitment date (baseline) - if yes mark them for exclusion
+          date_assessment_centre = object[row_col_index[k, 1], "Date.attending.assessment.centre.0.0"]
+          
+          if (as.Date(date_of_diag) - as.Date(date_assessment_centre) <= 0) {  
+            # Mark for exclusion as the date of diag is before (or on) date of attending assessment centre 
+            object[row_col_index[k, 1], "any_cancer_diag_before_baseline"] <- "1" # allow for each cancer type in turn 
+            object[row_col_index[k, 1], "cancer_before_baseline_binary"] <- "1"   # allow for running total
+          } 
+        }
+      }
+    }
+  }
+  ## Convert to 0 (int), 1 (int)
+  object$any_cancer_diag_before_baseline = as.integer(object$any_cancer_diag_before_baseline)
+  return(object)}
+
+
+cancer_region <- unique(cancer_encodings$Region)
+for (i in 1:length(cancer_region)) {  
+  curr_region <- cancer_region[i]                                                           
+  encodings_curr_region <- cancer_encodings[cancer_encodings$Region == curr_region, ]  # extract all cancer codes corresponding to current cancer region 
+  
+  print("####################### Start of new cancer type below #######################")
+  print(paste0("i = ", i, ": curr region: ", curr_region))
+  
+  ## Identify patients with an ICD10 cancer diagnosis before baseline  
+  ukbb_decoded <- cancer_diag_before_baseline(object = ukbb_decoded, index_icdcols=index_icd10cols, index_behav_cols = index_behav_cols, 
+                                              index_date_cols = index_date_cols, index_age_cols = index_age_cols, index_rec_orig = index_rec_orig,
+                                              behav_cols = behav_cols, cancer_behavs = cancer_behavs,
+                                              disease_codes = encodings_curr_region[encodings_curr_region$source == "ICD10", "Meaning"]) 
+  
+  # Rename any_cancer_diag_before_baseline to current_cancer_diag_before_baseline
+  ukbb_decoded[, paste0("ICD10-", curr_region, "-diag_before_baseline")] = ukbb_decoded$any_cancer_diag_before_baseline
+  ukbb_decoded = ukbb_decoded[, !(colnames(ukbb_decoded) %in% "any_cancer_diag_before_baseline")]
+  
+  ## Identify patients with an ICD9 cancer diagnosis before baseline  
+  ukbb_decoded <- cancer_diag_before_baseline(object = ukbb_decoded, index_icdcols=index_icd9cols, index_behav_cols = index_behav_cols, 
+                                              index_date_cols = index_date_cols, index_age_cols = index_age_cols, index_rec_orig = index_rec_orig,
+                                              behav_cols = behav_cols, cancer_behavs = cancer_behavs,
+                                              disease_codes = encodings_curr_region[encodings_curr_region$source == "ICD9", "Meaning"]) 
+                                              
+  ## Rename any_cancer_diag_before_baseline to current_cancer_diag_before_baseline
+  ukbb_decoded[, paste0("ICD9-", curr_region, "-diag_before_baseline")] = ukbb_decoded$any_cancer_diag_before_baseline
+  ukbb_decoded = ukbb_decoded[, !(colnames(ukbb_decoded) %in% "any_cancer_diag_before_baseline")]
+}
+write.csv(ukbb_decoded, row.names = F,
+          file = "UKBB_decoded_cancers_before_baseline.csv")
