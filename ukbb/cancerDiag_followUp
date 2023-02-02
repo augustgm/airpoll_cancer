@@ -1,0 +1,278 @@
+#############################################################
+# Identify cancer diagnoses and determine follow up period  #
+#     Determines diagnoses through cancer registry data     #
+#############################################################
+library(readxl)
+library(dplyr)
+library(reshape2)
+library(zoo)
+
+## Read in data: columns contain relevant UKBB variables
+ukbb_decoded <- read.csv("/UKBB_decoded_cancer_reg_hosp_diag_data.csv",
+                         stringsAsFactors = F, header = T)
+
+#### Cancer codes ####
+## Read in uKBB data encoding definitions
+bb_codings <- read.delim(file = "UKbiobankCodings.tsv",
+                         header = T, stringsAsFactors = F)
+
+## Read in anatomical definitions of ICD10 cancers
+cancer_codes_by_region <- read.csv("cancer_codes_cancer_region.csv")
+
+## Data frame containing variables of interest mapped to their UKBB data field ID and encoding
+ukbb_data_ids = as.data.frame(read_excel("LC_UKBB_fieldIDs_CoxAnalyses.xlsx"))
+
+## Merge to get cancer encodings
+coded_data <- ukbb_data_ids[ukbb_data_ids$Name == "Type.of.cancer.ICD10", ]
+encodings <- merge(coded_data, bb_codings, by.x = "Coding") 
+
+## Obtain data frame of all cancer subtypes codes and their meaning
+index_cancers <- grep("C", encodings$Value)
+cancer_encodings <- encodings[index_cancers, c("Value", "Meaning")]
+
+# Remove cancer_encodings rows with "Block" in them - these aren't diagnoses, they define code chunks (e.g. C00-14)
+index <- grep("Block", cancer_encodings$Value)
+cancer_encodings <- cancer_encodings[-index, ]
+
+# Assign certain codes the name of their cancer e.g:
+cancer_encodings$Region <- NA
+for (i in 1:nrow(cancer_codes_by_region)) {
+  index <- grep(cancer_codes_by_region$Code[i], cancer_encodings$Meaning)
+  cancer_encodings[index, "Region"] <- cancer_codes_by_region$Cancer.Type[i]
+}
+
+#  remove NAs - codes which do not map to a region (e.g. C78, as instead, it was split into C78.1, C78.2 etc.), 
+# C91 Lymphoid leukaemia split into CLL and ALL, C92 Myeloid leukaemia split into AML, CML
+cancer_encodings[is.na(cancer_encodings$Region), ]  
+cancer_encodings <- cancer_encodings[!is.na(cancer_encodings$Region), ]  
+rm(bb_codings, encodings, i, index, cancer_codes_by_region, ukbb_data_ids)
+
+
+#### Cancer Reg ICD10 codes ####
+## Cancer Registry column names
+cancer_type_cols = grep("Type.of.cancer.ICD10", colnames(ukbb_decoded), value = T)
+cancer_icd9_cols = grep("Type.of.cancer.ICD9", colnames(ukbb_decoded), value = T)
+date_diag_cols = grep("Date.of.cancer", colnames(ukbb_decoded), value = T)
+behav_cols = grep("Behaviour.of.cancer.tumour", colnames(ukbb_decoded), value = T)
+age_diag_cols = grep("Age.at.cancer", colnames(ukbb_decoded), value = T)
+rec_orig_cols = grep("Cancer.record.origin", colnames(ukbb_decoded), value = T)
+
+## cancer registry column positions
+index_icd10cols = grep("Type.of.cancer.ICD10", colnames(ukbb_decoded), value = F)
+index_date_cols = grep("Date.of.cancer", colnames(ukbb_decoded), value = F)
+index_behav_cols = grep("Behaviour.of.cancer.tumour", colnames(ukbb_decoded), value = F)
+index_age_cols = grep("Age.at.cancer", colnames(ukbb_decoded), value = F)
+index_rec_orig = grep("Cancer.record.origin", colnames(ukbb_decoded), value = F)
+
+## define cancer as ICD10 code from Type.of.Cancer.ICD10 column combined with malignant behaviour from Behaviour.of.cancer.tumour
+# if multiple diagnoses of cancer subtype that matches to cancer type, take first date of first occurrence
+# exclude if date of diagnosis < date of first occurrence
+
+cancer_diag_and_onset_age = function(object, index_icd10cols, index_behav_cols, index_date_cols,
+                                     index_age_cols, disease_codes, index_rec_orig, behav_cols) {  
+  ## Convert all NAs in cancer behaviour column to string
+  for (i in 1:length(behav_cols)) {
+    curr_col = behav_cols[i]
+    object[is.na(object[, curr_col]), curr_col] = "NA"
+  }
+  
+  ## Create columns to hold outputs
+  object$curr_cancer_binary <- "0"
+  object$curr_cancer_age_diag <- NA
+  object$curr_cancer_diag_date <- "NA"
+  object$diag_before_baseline <- "0"
+  object$cancer_register <- "NA"  
+  
+  ## Iterate through ICD10 codes for cancer subtypes mapping to current region
+  for (i in 1:length(disease_codes)) {
+    curr_cancer = disease_codes[i]
+    
+    # Determine row-column index of entries matching to current cancer ICD10 code
+    row_col_index <- which(object[, index_icd10cols] == curr_cancer, arr.ind = T)
+    
+    ## If this ICD10 code is present for >= 1 patient, check behaviour
+    if (nrow(row_col_index) >= 1) {
+      for (k in 1:nrow(row_col_index)) {
+        
+        ## Check the behaviour entry corresponding to current patient's ICD10 cancer code is malignant primary
+        if (object[row_col_index[k, 1], index_behav_cols[row_col_index[k, 2]]] == "Malignant, primary site") {  
+          
+          ## Get date of diagnosis for current patient and malignant primary cancer type (ICD10 code)
+          # indexing into index_date_cols with column index from row_col_index as all cancer registry columns have same number and map to each other
+          # Therefore, 2nd column in index_icd10cols corresponds to second column of index_date_cols, index_behav_cols etc.
+          date_of_diag = object[row_col_index[k, 1], index_date_cols[row_col_index[k, 2]]]
+          
+          ## Determine if date of diagnosis is before recruitment date (baseline) - if yes mark them for exclusion
+          date_assessment_centre = object[row_col_index[k, 1], "Date.attending.assessment.centre.0.0"]
+          
+          if (as.Date(date_of_diag) - as.Date(date_assessment_centre) <= 0) {
+            # Mark for exclusion as the date of diag is before date of attending assessment centre 
+            object[row_col_index[k, 1], "diag_before_baseline"] <- "1"
+            object[row_col_index[k, 1], "curr_cancer_binary"] <- "NA"
+            object[row_col_index[k, 1], "curr_cancer_age_diag"] <- NA
+            object[row_col_index[k, 1], "curr_cancer_diag_date"] <- "NA"
+            
+          } else {  # if they are not diagnosed before baseline and thus not excluded
+            
+            # If they are not diagnosed before baseline, then update their entries
+            if (object[row_col_index[k, 1], "diag_before_baseline"] == "0") {
+              
+              # If they have not been diagnosed with a previous disease_codes entry for this cancer type 
+              if (object[row_col_index[k, 1], "curr_cancer_binary"] == "0") 
+                age_at_diag = object[row_col_index[k, 1], index_age_cols[row_col_index[k, 2]]]
+                object[row_col_index[k, 1], "curr_cancer_binary"] <- "1"
+                object[row_col_index[k, 1], "curr_cancer_age_diag"] <- age_at_diag 
+                object[row_col_index[k, 1], "curr_cancer_diag_date"] <- date_of_diag
+                object[row_col_index[k, 1], "cancer_register"] = object[row_col_index[k, 1], index_rec_orig[row_col_index[k, 2]]]
+                
+              } else { # if this patient DOES have a previous disease_codes entry for this cancer type - must consider if current diag date is prior to prev diag date (due to data not necessarily being in chronological order)
+                # if diag date for current diseaes_code entry is earlier than diag date for the previous disease_code entry that maps to the same cancer type - update Age and diag date to reflect the earlier date 
+                # if the dates are the same or the current diag date is later, then leave the date as is
+                if (as.Date(date_of_diag) < as.Date(object[row_col_index[k, 1], "curr_cancer_diag_date"])) { 
+                  age_at_diag = object[row_col_index[k, 1], index_age_cols[row_col_index[k, 2]]]
+                  object[row_col_index[k, 1], "curr_cancer_binary"] <- "1"
+                  object[row_col_index[k, 1], "curr_cancer_age_diag"] <- age_at_diag
+                  object[row_col_index[k, 1], "curr_cancer_diag_date"] <- date_of_diag
+                  object[row_col_index[k, 1], "cancer_register"] = object[row_col_index[k, 1], index_rec_orig[row_col_index[k, 2]]]
+                }
+              }
+            }  
+          }
+        }
+      }
+    }
+  }
+  
+  ## Convert "NA", "0", "1", strings to NA, 0, 1
+  object[object$curr_cancer_binary == "NA", "curr_cancer_binary"] = NA
+  object[object$curr_cancer_diag_date == "NA", "curr_cancer_diag_date"] = NA
+  object$curr_cancer_binary = as.integer(object$curr_cancer_binary)
+  object$diag_before_baseline = as.integer(object$diag_before_baseline)
+  return(object)}
+
+
+cancer_region <- unique(cancer_encodings$Region)
+cancer_region = cancer_region[!(cancer_region %in% grep("secondary", cancer_region, ignore.case = T, value = T))]
+cancer_region = cancer_region[!(cancer_region %in% grep("Other_and_ill-defined_", cancer_region, ignore.case = T, value = T))]
+cancer_region = cancer_region[cancer_region != "Unspecified_site"]
+
+# subset to just pleural mesothelioma
+cancer_encodings[cancer_encodings$Region == "Mesothelioma", ]
+cancer_encodings = cancer_encodings[!((cancer_encodings$Region == "Mesothelioma") & (cancer_encodings$Meaning %in% c("C45 Mesothelioma", "C45.1 Mesothelioma of peritoneum",
+                                                                                                                     "C45.2 Mesothelioma of pericardium", "C45.7 Mesothelioma of other sites",
+                                                                                                                     "C45.9 Mesothelioma, unspecified"))), ]
+
+## Identify those lost to follow-up ##
+pats_lost = ukbb_decoded[(!(is.na(ukbb_decoded$Date_lost_followup.0.0))), "Patient_ID"]
+ukbb_decoded$lost_followup = 0
+ukbb_decoded[ukbb_decoded$Patient_ID %in% pats_lost, "lost_followup"] <- 1
+
+pats_lost_died = ukbb_decoded[(ukbb_decoded$Patient_ID %in% pats_lost) & (!(is.na(ukbb_decoded$Date.of.death.0.0))), "Patient_ID"]  
+
+## Identify those who died during the study period ##
+ukbb_decoded$died_during_study = 0
+ukbb_decoded[(!(is.na(ukbb_decoded$Date.of.death.0.0))) & 
+               (as.Date(ukbb_decoded$Date.of.death.0.0) <= as.Date("2018-12-31")), "died_during_study"] = 1
+
+## Iterate through each cancer type 
+for (i in 1:length(cancer_region)) {  
+  curr_region <- cancer_region[i]                                       
+  encodings_curr_region <- cancer_encodings[cancer_encodings$Region == curr_region, ]  # extract all cancer codes corresponding to current cancer region 
+  print(paste0("i = ", i, ": curr region: ", curr_region))
+  
+  ## quick check in case an iteration was skipped - delete the column before it causes errors later with the merging
+  if ("curr_cancer_censor_date" %in% colnames(ukbb_decoded)) {
+    ukbb_decoded$curr_cancer_censor_date <- NULL
+  }
+  
+  
+  ## Identify cancer patients and age at diagnosis 
+  ukbb_decoded <- cancer_diag_and_onset_age(object = ukbb_decoded, index_icd10cols=index_icd10cols, index_behav_cols = index_behav_cols, 
+                                            index_date_cols = index_date_cols, index_age_cols = index_age_cols, index_rec_orig = index_rec_orig,
+                                            disease_codes = encodings_curr_region$Meaning, behav_cols = behav_cols)  
+  print(unique(ukbb_decoded$curr_cancer_binary))               
+  print(table(ukbb_decoded$curr_cancer_binary))                
+  
+  ### Use censoring date: 31/12/2018
+  ### Define those included patients who where diagnosed with current cancer during the study period
+  pats_diag_during_study = ukbb_decoded[(!(is.na(ukbb_decoded$curr_cancer_binary))) & (ukbb_decoded$curr_cancer_binary == 1) & 
+                                          (!(is.na(ukbb_decoded$curr_cancer_diag_date))) &
+                                          (as.Date(ukbb_decoded$curr_cancer_diag_date) <= as.Date("2018-12-31")), "Patient_ID"]
+  
+  ## Find subset of included patients who were diagnosed after the censor date and mark them as non-diagnosed
+  pats_diag_after_study = ukbb_decoded[(!(is.na(ukbb_decoded$curr_cancer_binary))) & (ukbb_decoded$curr_cancer_binary == 1) &
+                                         (!(is.na(ukbb_decoded$curr_cancer_diag_date))) &
+                                         (as.Date(ukbb_decoded$curr_cancer_diag_date) > as.Date("2018-12-31")), "Patient_ID"]
+  
+  ## Mark those who were diagnosed after the study period as not diagnosed during the study period
+  ukbb_decoded[ukbb_decoded$Patient_ID %in% pats_diag_after_study, "curr_cancer_age_diag"] = NA   
+  ukbb_decoded[ukbb_decoded$Patient_ID %in% pats_diag_after_study, "curr_cancer_diag_date"] = NA  
+  ukbb_decoded[ukbb_decoded$Patient_ID %in% pats_diag_after_study, "curr_cancer_binary"] = 0
+  
+  ### Define end of follow-up dates: date of cancer diag, death, lost to follow-up, or 2018-12-31, whichever is earliest
+  ## get long data frame of all the relevant dates for each patient
+  ukbb_decoded$censor_date = "2018-12-31"
+  ukbb_dates = reshape2::melt(ukbb_decoded[, c("Patient_ID", "Date.of.death.0.0", "Date_lost_followup.0.0", "curr_cancer_diag_date", "censor_date")],
+                              id.vars = "Patient_ID")
+  
+  ## Exclude any entries with NA - these are empty values corresponding to death date, lost follow-up date, cancer diag date
+  ## for those who did not die, were not lost, or did not get diagnosed with cancer  
+  ukbb_dates = na.omit(ukbb_dates)
+  
+  ## convert to date
+  ukbb_dates$value = as.Date(ukbb_dates$value)
+  
+  ## For each patient, choose the earliest date
+  earl_date = ukbb_dates %>%
+    group_by(Patient_ID) %>%
+    summarise(curr_cancer_censor_date = min(value))
+  
+  ukbb_decoded = merge(x = ukbb_decoded, y = earl_date, by = "Patient_ID")
+  ukbb_decoded$censor_date <- NULL
+  
+  #### Sense checks ####
+  pats_diag_after_lost = ukbb_decoded[(!(is.na(ukbb_decoded$curr_cancer_binary))) & (ukbb_decoded$curr_cancer_binary == 1) & 
+                                        (!(is.na(ukbb_decoded$Date_lost_followup.0.0))) &
+                                        (as.Date(ukbb_decoded$curr_cancer_diag_date) > as.Date(ukbb_decoded$Date_lost_followup.0.0)), "Patient_ID"]
+  
+  oracle = length(pats_diag_after_lost) 
+  if (oracle != 0) { ## if patients were diagnosed after being lost-to-follow-up, they should be censored to date lost to follow-up.  
+    oracle = all(ukbb_decoded[ukbb_decoded$Patient_ID %in% pats_diag_after_lost, 
+                              "curr_cancer_censor_date"] ==  ukbb_decoded[ukbb_decoded$Patient_ID %in% pats_diag_after_lost, "Date_lost_followup.0.0"])
+    if (!(oracle)) {
+      print(paste0("############# ", curr_region, " FAILED sense check: diag after lost to follow-up ####################"))
+      next()
+    } else {  # if sense checks passed, need to update the cancer diag columns to reflect their censored status 
+      ukbb_decoded[ukbb_decoded$Patient_ID %in% pats_diag_after_lost, "curr_cancer_binary"] <- 0    # not diagnosed prior to censoring
+      ukbb_decoded[ukbb_decoded$Patient_ID %in% pats_diag_after_lost, "curr_cancer_age_diag"] = NA  # not diagnosed prior to censoring
+      ukbb_decoded[ukbb_decoded$Patient_ID %in% pats_diag_after_lost,  "curr_cancer_diag_date"] = NA  # not diagnosed prior to censoring
+    }
+  }
+
+  ### Determine time to event
+  ukbb_decoded$follow_up_period <- as.numeric(difftime(time1 = ukbb_decoded$curr_cancer_censor_date, 
+                                                       time2 = ukbb_decoded$Date.attending.assessment.centre.0.0, units = "days"))
+    
+  ## change column names to match current cancer
+  ukbb_decoded[, paste0(curr_region, "_censor_date")] <- ukbb_decoded$curr_cancer_censor_date
+  ukbb_decoded[, paste0(curr_region, "_time")] = ukbb_decoded$follow_up_period
+  ukbb_decoded[, paste0(curr_region, "_binary")] <- ukbb_decoded$curr_cancer_binary
+  ukbb_decoded[, paste0(curr_region, "_age_diag")] <- ukbb_decoded$curr_cancer_age_diag    
+  ukbb_decoded[, paste0(curr_region, "_diag_date")] <- ukbb_decoded$curr_cancer_diag_date
+  
+  ## delete the censor column to prevent errors in future
+  ukbb_decoded$curr_cancer_censor_date <- NULL
+}
+
+ukbb_cancer <- ukbb_decoded[, c("Patient_ID", 
+                                grep("binary", colnames(ukbb_decoded), value = T),
+                                grep("age_diag", colnames(ukbb_decoded), value = T),          
+                                grep("time$", colnames(ukbb_decoded), value = T),               
+                                grep("_censor_date", colnames(ukbb_decoded), value = T))]  
+
+write.csv(ukbb_cancer, row.names = F,
+          file = "/ukbb_primary_cancers_for_merge_with_imputation.csv")
+          
+          
+          
+          
