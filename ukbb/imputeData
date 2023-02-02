@@ -1,0 +1,74 @@
+##########################################
+#    Imputations using cancer outcomes   #
+# Run for each cancer type independently #
+##########################################
+library(mice)
+library(zoo)
+
+## Read in data
+ukbb_decoded = read.csv(header = T, stringsAsFactors = F, file = "ukbb_smoking3_packyears_cancer_specific_gPCs_for_impute.csv")
+
+## Change variable names
+colnames(ukbb_decoded)[colnames(ukbb_decoded) == "PM2.5.0.0"] = "Air.pollution.pm2.5"
+colnames(ukbb_decoded) = gsub(pattern = "Genetic.principal.components", replacement = "Genetic_principal_components", x = colnames(ukbb_decoded))
+
+## Assess the percentage missing for each variable
+100 * (sum(is.na(ukbb_decoded$Sex.0.0)) / length(ukbb_decoded$Sex.0.0))  
+100 * (sum(is.na(ukbb_decoded$Smoking.status.0.0)) / length(ukbb_decoded$Smoking.status.0.0))  
+100 * (sum(is.na(ukbb_decoded$Packyears.0.0)) / length(ukbb_decoded$Packyears.0.0))  
+100 * (sum(is.na(ukbb_decoded$Tobacco.smoke.exposure.home.0.0)) / length(ukbb_decoded$Tobacco.smoke.exposure.home.0.0))  
+100 * (sum(is.na(ukbb_decoded$BMI.0.0)) / length(ukbb_decoded$BMI.0.0))  
+100 * (sum(is.na(ukbb_decoded$Total.household.income.before.tax.0.0)) / length(ukbb_decoded$Total.household.income.before.tax.0.0))
+100 * (sum(is.na(ukbb_decoded$Educational.attainment)) / length(ukbb_decoded$Educational.attainment))
+100 * (sum(is.na(ukbb_decoded$Air.pollution.pm2.5)) / length(ukbb_decoded$Air.pollution.pm2.5))
+100 * (sum(is.na(ukbb_decoded$Genetic_principal_components.0.1)) / length(ukbb_decoded$Genetic_principal_components.0.1))
+
+## Cancers to impute
+cancer_reg = grep("_binary", colnames(ukbb_decoded), value = T)
+cancer_reg = cancer_reg[cancer_reg != "curr_cancer_binary"]
+cancer_reg = unlist(lapply(strsplit(cancer_reg, split = "_binary"), FUN = function(x){x[1]}))
+
+base_cols = c("Patient_ID", "Age", "Smoking.status.0.0", "Packyears.0.0", "Tobacco.smoke.exposure.home.0.0", "Sex.0.0", "BMI.0.0", 
+              "Total.household.income.before.tax.0.0", "Educational.attainment", "Air.pollution.pm2.5")
+
+for (i in cancer_reg) {
+  curr_cancer = cancer_reg[i]
+  print(paste0("current cancer = ", curr_cancer))
+  columns = c(base_cols, "Genetic_principal_components.0.1", "Genetic_principal_components.0.2", 
+              "Genetic_principal_components.0.3", "Genetic_principal_components.0.4", "Genetic_principal_components.0.5", "Genetic_principal_components.0.6",
+              "Genetic_principal_components.0.7", "Genetic_principal_components.0.8", "Genetic_principal_components.0.9", "Genetic_principal_components.0.10",
+              "Genetic_principal_components.0.11", "Genetic_principal_components.0.12", "Genetic_principal_components.0.13",
+              "Genetic_principal_components.0.14", "Genetic_principal_components.0.15", 
+              paste0(curr_cancer, "_binary"), paste0(curr_cancer, "_time"))
+  bb_to_impute = ukbb_decoded[, columns]  
+  
+  ### Perform imputation 
+  ## Ensure appropriate factors representation
+  bb_to_impute$Sex.0.0 = factor(bb_to_impute$Sex.0.0, levels = c("Female", "Male"))  
+  bb_to_impute$Smoking.status.0.0 = factor(bb_to_impute$Smoking.status.0.0, levels = c("Never", "Previous", "Current"))  
+  bb_to_impute$Total.household.income.before.tax.0.0 = factor(bb_to_impute$Total.household.income.before.tax.0.0, levels = c("< 31k", ">= 31k"))  
+  bb_to_impute$Educational.attainment = factor(bb_to_impute$Educational.attainment,levels = c("< degree", ">= degree"))
+  
+  ## get predictor matrix
+  pred_matrix = make.predictorMatrix(data = bb_to_impute)
+  pred_matrix[, "Patient_ID"] = 0  # set to 0 so ID is not used to predict value for any variable (i.e. does not impute). Also: http://www.columbia.edu/~sjm2186/EPIC_R/EPIC_R_MultipleImputationShort.pdf
+  
+  ## Perform imputation  
+  imputed_pc = mice(data = bb_to_impute, m = 15, maxit = 180, seed = 500, predictorMatrix = pred_matrix,
+                    method = c("", "",                         # Patient ID and Age not imputed
+                               "rf", "pmm", "pmm", "",         # sex not imputed 
+                               "pmm", "logreg", "logreg",      
+                               "",                             # PM data not imputed (excluded missing data already) 
+                               "", "", "",                     # genetic PCs data not imputed (excluded missing data already)
+                               "", "", "",
+                               "", "", "",
+                               "", "", "",
+                               "", "", "",
+                               "", ""))                        # cancer_binary and cancer_time not imputed                    
+    
+  ## save to file
+  saveRDS(imputed_pc, 
+          file = paste0("imp_cox_analysis_baselineAge_incl_gPCs_", curr_cancer,"_outcomes.rds"))
+  
+  print(paste0("#### DONE CANCER = ", curr_cancer, " ####"))
+}
