@@ -1,0 +1,65 @@
+##########################################################################
+# Imputations using cancer outcomes for lung cancer using PHE Radon data #
+#       Include packyears, 3-level smoking, and passive smoking          #
+##########################################################################
+library(mice)
+library(zoo)
+
+## Define parameters
+eth_gpc = "gPCs"  #
+
+## Read in data
+ukbb_decoded = read.csv(header = T, stringsAsFactors = F,
+                        file = "ukbb_smoking3_packyears_lung_otherPoll_for_impute.csv")
+
+## Change variable names
+colnames(ukbb_decoded)[colnames(ukbb_decoded) == "PM2.5.0.0"] = "Air.pollution.pm2.5"
+colnames(ukbb_decoded)[colnames(ukbb_decoded) == "PM10.0.0"] = "Air.pollution.pm10"
+colnames(ukbb_decoded) = gsub(pattern = "Genetic.principal.components", replacement = "Genetic_principal_components", x = colnames(ukbb_decoded))
+
+## Subset to relevant columns for imputation
+base_cols = c("Patient_ID", "Age", "Smoking.status.0.0", "Packyears.0.0", "Tobacco.smoke.exposure.home.0.0", "Sex.0.0", "BMI.0.0", 
+              "Total.household.income.before.tax.0.0", "Educational.attainment")
+curr_poll = "mode_Radon"
+curr_cancer = "Bronchus_and_lung"
+print(paste0("current cancer = ", curr_cancer))
+columns = c(base_cols, curr_poll, "Genetic_principal_components.0.1", "Genetic_principal_components.0.2", 
+            "Genetic_principal_components.0.3", "Genetic_principal_components.0.4",
+            "Genetic_principal_components.0.5", "Genetic_principal_components.0.6", "Genetic_principal_components.0.7", 
+            "Genetic_principal_components.0.8", "Genetic_principal_components.0.9", "Genetic_principal_components.0.10",
+            "Genetic_principal_components.0.11", "Genetic_principal_components.0.12", "Genetic_principal_components.0.13",
+            "Genetic_principal_components.0.14", "Genetic_principal_components.0.15", 
+            paste0(curr_cancer, "_binary"), paste0(curr_cancer, "_time"))
+
+bb_to_impute = ukbb_decoded[, columns]  
+bb_to_impute = bb_to_impute[!(is.na(bb_to_impute[, curr_poll])), ]  
+  
+## Factor representation
+bb_to_impute$Sex.0.0 = factor(bb_to_impute$Sex.0.0, levels = c("Female", "Male"))  
+bb_to_impute$Smoking.status.0.0 = factor(bb_to_impute$Smoking.status.0.0, levels = c("Never", "Previous", "Current"))
+bb_to_impute$Total.household.income.before.tax.0.0 = factor(bb_to_impute$Total.household.income.before.tax.0.0, levels = c("< 31k", ">= 31k"))
+bb_to_impute$Educational.attainment = factor(bb_to_impute$Educational.attainment, levels = c("< degree", ">= degree"))
+ 
+## get predictor matrix
+pred_matrix = make.predictorMatrix(data = bb_to_impute)
+pred_matrix[, "Patient_ID"] = 0
+  
+## Perform imputation
+print(summary(bb_to_impute))
+colnames(bb_to_impute)
+
+imputed_pc = mice(data = bb_to_impute, m = 15, maxit = 180, seed = 500, predictorMatrix = pred_matrix,
+                  method = c("", "",                         # Patient ID and Age not imputed
+                             "rf", "pmm", "pmm", "",         # sex not imputed 
+                             "pmm", "logreg", "logreg",      
+                             "",                             # Radon data not imputed 
+                             "", "", "",                     # genetic PCs data not imputed (excluded missing data already)
+                             "", "", "",
+                             "", "", "",
+                             "", "", "",
+                             "", "", "",
+                             "", ""))                        # cancer_binary and cancer_time not imputed                    
+  
+## save to file
+saveRDS(imputed_pc, 
+        file = paste0("imp_cox_analysis_baselineAge_incl_gPCs_", curr_cancer, "_", curr_poll, "_outcomes.rds"))
